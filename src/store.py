@@ -146,7 +146,7 @@ class QdrantStore:
 
         mode = self._connection_cfg.get("mode", "local")
         if mode == "remote":
-            url = self._connection_cfg.get("url") or "http://localhost:6333"
+            url = self._connection_cfg.get("url") or "http://127.0.0.1:6333"
             api_key_env = self._connection_cfg.get("api_key_env")
             api_key = None
             if api_key_env:
@@ -184,6 +184,54 @@ class QdrantStore:
             logger.info(
                 "qdrant collection '%s' created (dim=%d)", self.collection, self.embedder.dim
             )
+        else:
+            # Collection exists — verify it has the expected "dense" vector.
+            # After a Qdrant snapshot restore the schema may be missing "dense",
+            # which causes upserts to fail with "Not existing vector name error: dense".
+            try:
+                vec_info = self._client.get_collection(self.collection)
+                vectors_cfg = vec_info.config.params.vectors
+                dense_present = True
+                try:
+                    # VectorsConfig can be Dict[str, VectorParams] (named) or VectorParams (unnamed)
+                    if (
+                        isinstance(vectors_cfg, dict)
+                        or vectors_cfg is not None
+                        and hasattr(vectors_cfg, "__contains__")
+                    ):
+                        dense_present = "dense" in vectors_cfg
+                except (TypeError, KeyError, AttributeError) as exc:
+                    logger.debug("vector schema check skipped: %s", exc)
+                if not dense_present:
+                    logger.warning(
+                        "qdrant collection '%s' exists but lacks 'dense' vector — "
+                        "dropping and recreating with correct schema",
+                        self.collection,
+                    )
+                    self._client.delete_collection(self.collection)
+                    self._client.create_collection(
+                        collection_name=self.collection,
+                        vectors_config={
+                            "dense": VectorParams(size=self.embedder.dim, distance=Distance.COSINE)
+                        },
+                        sparse_vectors_config={"sparse": SparseVectorParams()},
+                    )
+                    for field in ("kind", "agent_workspace", "user_id", "category", "content_hash"):
+                        try:
+                            self._client.create_payload_index(
+                                self.collection, field, PayloadSchemaType.KEYWORD
+                            )
+                        except Exception as exc:
+                            logger.debug("create_payload_index(%s) skipped: %s", field, exc)
+                    logger.info(
+                        "qdrant collection '%s' recreated (dim=%d)",
+                        self.collection,
+                        self.embedder.dim,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Could not verify vector schema on collection '%s': %s", self.collection, exc
+                )
 
     def start_worker(self) -> None:
         _ = self.client  # ensure open

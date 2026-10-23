@@ -34,8 +34,13 @@ class RemoteDenseEmbedder:
     error. Failing the write is the recoverable outcome; a silent dimension change is not.
     """
 
-    def __init__(self, base_url: str, model: str, timeout: float = REMOTE_TIMEOUT_S,
-                 retries: int = REMOTE_RETRIES) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        timeout: float = REMOTE_TIMEOUT_S,
+        retries: int = REMOTE_RETRIES,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
@@ -58,22 +63,25 @@ class RemoteDenseEmbedder:
         last: Exception | None = None
         for attempt in range(self.retries + 1):
             req = urllib.request.Request(
-                f"{self.base_url}/embeddings", data=body,
-                headers={"Content-Type": "application/json"}, method="POST")
+                f"{self.base_url}/embeddings",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                     payload = json.loads(resp.read().decode("utf-8", "replace"))
                 rows = sorted(payload.get("data") or [], key=lambda r: r.get("index", 0))
                 vectors = [r["embedding"] for r in rows]
                 if len(vectors) != len(texts):
-                    raise ValueError(
-                        f"expected {len(texts)} embeddings, got {len(vectors)}")
+                    raise ValueError(f"expected {len(texts)} embeddings, got {len(vectors)}")
                 return vectors
             except Exception as exc:  # noqa: BLE001 - retried below, then raised
                 last = exc
         raise RuntimeError(
             f"remote embedder {self.base_url} failed after {self.retries + 1} attempt(s): "
-            f"{type(last).__name__}: {last}")
+            f"{type(last).__name__}: {last}"
+        )
 
     @property
     def dim(self) -> int:
@@ -127,9 +135,14 @@ class FastEmbedEmbedder:
         if self._dense is None:
             with self._lock:
                 if self._dense is None:
+                    import onnxruntime
+
+                    onnxruntime.set_default_logger_severity(3)  # suppress affinity warnings
                     from fastembed import TextEmbedding
 
-                    self._dense = TextEmbedding(self.model_name)
+                    self._dense = TextEmbedding(
+                        self.model_name, cpu_threads=int(os.getenv("ONNXRUNTIME_NUM_THREADS", "1"))
+                    )
         return self._dense
 
     def _get_sparse(self):
